@@ -77,11 +77,13 @@ impl Hotspot {
 pub struct FallbackControls {
     /// A horizontal thumb wheel is available — mirrors `Capabilities::thumbwheel`.
     pub thumbwheel: bool,
-    /// The device reports HID++ `0x8100`+`0x8110` (a G-series gaming mouse
-    /// captured through the spy tap, not `0x1b04`). These devices have
-    /// neither a "ModeShift" DPI-toggle button nor a dedicated MX-style
-    /// gesture button — [`ButtonId::DpiToggle`] and [`ButtonId::GestureButton`]
-    /// are dropped from the silhouette in favor of the gaming-only buttons.
+    /// Mirrors `Capabilities::gaming_buttons`: the device reports HID++
+    /// `0x8100`+`0x8110` *and* OpenLogi has a verified `0x8110` button map
+    /// for this exact model (a G-series gaming mouse captured through the
+    /// spy tap, not `0x1b04`). These devices have neither a "ModeShift"
+    /// DPI-toggle button nor a dedicated MX-style gesture button —
+    /// [`ButtonId::DpiToggle`] and [`ButtonId::GestureButton`] are dropped
+    /// from the silhouette in favor of the gaming-only buttons.
     pub gaming_buttons: bool,
 }
 
