@@ -39,15 +39,16 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
     registry.replace_node(node.clone(), [route.clone()], retired_channel);
     let pending = PendingCaptureRestore::new(
         &retired,
-        ReprogRestore::new(
-            0x22,
-            vec![ArmedReporting {
-                cid: reprog_controls::GESTURE_BUTTON_CID,
-                original: reporting(false, None),
-            }],
-        ),
-        None,
-        None,
+        FirmwareOwnership {
+            reprog: ReprogRestore::new(
+                0x22,
+                vec![ArmedReporting {
+                    cid: reprog_controls::GESTURE_BUTTON_CID,
+                    original: reporting(false, None),
+                }],
+            ),
+            ..Default::default()
+        },
     )
     .expect("one diverted control should require restoration");
 
@@ -93,15 +94,16 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
     let retired = SharedChannel::new(retired_channel, route.clone());
     let pending = PendingCaptureRestore::new(
         &retired,
-        ReprogRestore::new(
-            0x22,
-            vec![ArmedReporting {
-                cid: reprog_controls::GESTURE_BUTTON_CID,
-                original: reporting(false, None),
-            }],
-        ),
-        None,
-        None,
+        FirmwareOwnership {
+            reprog: ReprogRestore::new(
+                0x22,
+                vec![ArmedReporting {
+                    cid: reprog_controls::GESTURE_BUTTON_CID,
+                    original: reporting(false, None),
+                }],
+            ),
+            ..Default::default()
+        },
     )
     .expect("one diverted control should require restoration");
 
@@ -150,15 +152,16 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
     let shared = SharedChannel::new(channel, route.clone());
     let pending = PendingCaptureRestore::new(
         &shared,
-        ReprogRestore::new(
-            0x22,
-            vec![ArmedReporting {
-                cid: reprog_controls::GESTURE_BUTTON_CID,
-                original: reporting(false, None),
-            }],
-        ),
-        None,
-        None,
+        FirmwareOwnership {
+            reprog: ReprogRestore::new(
+                0x22,
+                vec![ArmedReporting {
+                    cid: reprog_controls::GESTURE_BUTTON_CID,
+                    original: reporting(false, None),
+                }],
+            ),
+            ..Default::default()
+        },
     );
 
     let failure = rollback_capture_start(

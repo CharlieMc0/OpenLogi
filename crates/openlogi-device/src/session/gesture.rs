@@ -49,9 +49,9 @@ pub use spy::spy_buttons_for_model;
 #[cfg(test)]
 use super::capture_restore::undivert_change;
 use super::capture_restore::{
-    ArmedReporting, CaptureStop, ReprogRestore, divert_change, drop_listener_after,
-    restore_after_stop, rollback_capture_start, stop_for_current_publication,
-    wait_for_channel_change,
+    ArmedReporting, CaptureStop, FirmwareOwnership, ReprogRestore, divert_change,
+    drop_listener_after, poll_optional, restore_after_stop, rollback_capture_start,
+    stop_for_current_publication, wait_for_channel_change,
 };
 pub use super::capture_restore::{
     CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, GestureError,
@@ -553,9 +553,11 @@ impl ArmedControls {
             reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
         PendingCaptureRestore::new(
             retired,
-            reprog,
-            thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
-            spy.as_ref().map(|spy| spy.spy.feature_index()),
+            FirmwareOwnership {
+                reprog,
+                thumb_index: thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
+                spy_index: spy.as_ref().map(|spy| spy.spy.feature_index()),
+            },
         )
     }
 
@@ -626,14 +628,6 @@ struct CaptureMonitor<'a> {
 /// Keep a capture session alive and reapply its volatile diversions whenever
 /// the device announces a reconnect. Returns only the typed reason capture
 /// stopped; restoration performs a fresh registry lookup after monitoring.
-// Grown by the spy's own select arm (a fourth capture mechanism alongside
-// reprog/thumbwheel/wireless-reconnect, each already needing its own arm
-// here); splitting it would scatter one state machine across files for no
-// reader benefit.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one control-capture state machine; see the comment above"
-)]
 async fn monitor_capture(
     context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
@@ -693,12 +687,7 @@ async fn monitor_capture(
                 // be obsolete.
                 return stop_for_current_publication(context.registry, context.shared);
             }
-            event = async {
-                match wake_events.as_ref() {
-                    Some(events) => events.recv().await.ok(),
-                    None => std::future::pending().await,
-                }
-            } => {
+            event = poll_optional(wake_events.as_ref()) => {
                 let Some(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
                     wake_events = None;
                     continue;
@@ -709,12 +698,7 @@ async fn monitor_capture(
                 spy_mask = MouseButtonMask::default();
                 context.armed.rearm(&device_io).await;
             }
-            event = async {
-                match spy_events {
-                    Some(events) => events.recv().await.ok(),
-                    None => std::future::pending().await,
-                }
-            } => {
+            event = poll_optional(spy_events) => {
                 let Some(MouseButtonSpyEvent::Buttons(mask)) = event else {
                     // The receiver's sender was dropped (the spy feature went
                     // away) — stop polling a permanently-closed channel.

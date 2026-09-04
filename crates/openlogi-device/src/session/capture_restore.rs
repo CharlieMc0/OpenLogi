@@ -146,6 +146,27 @@ pub struct PendingCaptureRestore {
     spy_index: Option<u8>,
 }
 
+/// What firmware ownership a capture session armed, handed to
+/// [`PendingCaptureRestore::new`] as one value instead of a run of
+/// same-typed positional `Option`s that a call site could silently
+/// transpose.
+#[derive(Default)]
+pub(crate) struct FirmwareOwnership {
+    /// `0x1b04` controls diverted, if any.
+    pub(crate) reprog: Option<ReprogRestore>,
+    /// `0x2150 Thumbwheel` feature index, if diverted.
+    pub(crate) thumb_index: Option<u8>,
+    /// `0x8110 MouseButtonSpy` feature index, present when the session armed
+    /// the spy.
+    pub(crate) spy_index: Option<u8>,
+}
+
+impl FirmwareOwnership {
+    fn is_empty(&self) -> bool {
+        self.reprog.is_none() && self.thumb_index.is_none() && self.spy_index.is_none()
+    }
+}
+
 impl fmt::Debug for PendingCaptureRestore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PendingCaptureRestore")
@@ -164,22 +185,17 @@ impl fmt::Debug for PendingCaptureRestore {
 }
 
 impl PendingCaptureRestore {
-    pub(crate) fn new(
-        retired: &SharedChannel,
-        reprog: Option<ReprogRestore>,
-        thumb_index: Option<u8>,
-        spy_index: Option<u8>,
-    ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() && spy_index.is_none() {
+    pub(crate) fn new(retired: &SharedChannel, ownership: FirmwareOwnership) -> Option<Self> {
+        if ownership.is_empty() {
             return None;
         }
         Some(Self {
             route: retired.route().clone(),
             retired_channel: Arc::downgrade(retired.channel()),
             retired_policy: RetiredChannelPolicy::ReplacementOnly,
-            reprog,
-            thumb_index,
-            spy_index,
+            reprog: ownership.reprog,
+            thumb_index: ownership.thumb_index,
+            spy_index: ownership.spy_index,
         })
     }
 
@@ -340,6 +356,17 @@ pub(crate) async fn drop_listener_after<T, R>(listener: T, teardown: impl Future
     let result = teardown.await;
     drop(listener);
     result
+}
+
+/// One arm of a `tokio::select!` reconnect/event loop: await the next value
+/// from `receiver` when armed, or never resolve when it's `None` so the
+/// `select!` simply skips this arm. Shared by every event source a capture
+/// session's monitor loop polls this way (wireless reconnect, the button spy).
+pub(crate) async fn poll_optional<T>(receiver: Option<&async_channel::Receiver<T>>) -> Option<T> {
+    match receiver {
+        Some(receiver) => receiver.recv().await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 /// Divert a control in the requested mode while preserving its remap target.

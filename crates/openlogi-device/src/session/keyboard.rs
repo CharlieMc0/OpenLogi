@@ -29,9 +29,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use super::capture_restore::{
-    ArmedReporting, CaptureStop, ReprogRestore, divert_change, drop_listener_after,
-    restore_after_stop, rollback_capture_start, stop_for_current_publication,
-    wait_for_channel_change,
+    ArmedReporting, CaptureStop, FirmwareOwnership, ReprogRestore, divert_change,
+    drop_listener_after, poll_optional, restore_after_stop, rollback_capture_start,
+    stop_for_current_publication, wait_for_channel_change,
 };
 use super::gesture::{
     CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
@@ -285,12 +285,7 @@ async fn monitor_keyboard_capture(
                 info!(index = context.device_index, "inventory replaced or removed keyboard capture channel — restarting session");
                 return transition;
             }
-            event = async {
-                match wake_events.as_ref() {
-                    Some(events) => events.recv().await.ok(),
-                    None => std::future::pending().await,
-                }
-            } => {
+            event = poll_optional(wake_events.as_ref()) => {
                 let Some(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
                     wake_events = None;
                     continue;
@@ -337,9 +332,10 @@ impl ArmedKeys {
         let feature_index = self.controls.feature_index();
         PendingCaptureRestore::new(
             retired,
-            ReprogRestore::new(feature_index, self.reporting),
-            None,
-            None,
+            FirmwareOwnership {
+                reprog: ReprogRestore::new(feature_index, self.reporting),
+                ..Default::default()
+            },
         )
     }
 }
