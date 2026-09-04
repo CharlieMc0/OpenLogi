@@ -227,7 +227,7 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
     }
 }
 
-/// Result of [`race_sources`]: which source answered, or why none did.
+/// Result of a [`MirrorRace`]: which source answered, or why none did.
 enum RaceOutcome<T> {
     /// This source's probe succeeded and should supply the registry.
     Use(BuiltInSource, T),
@@ -242,24 +242,132 @@ enum RaceOutcome<T> {
     Interrupted,
 }
 
-/// Arbitrate the three probe threads' results.
+/// What the owning loop should do after feeding [`MirrorRace`] one event.
+enum Step<T> {
+    /// The race is decided — use this outcome.
+    Done(RaceOutcome<T>),
+    /// Keep waiting; recompute the receive timeout from
+    /// [`MirrorRace::deadline`]. Carries the source of a second pinned-mirror
+    /// success arriving while one was already held, purely so the loop can
+    /// log it — nothing else about the race changes.
+    Continue { superseded: Option<BuiltInSource> },
+}
+
+/// Pure decision state for arbitrating [`BuiltInSource`] probe results.
 ///
-/// Production wins immediately. A pinned mirror (Pages or jsDelivr)
-/// answering first only wins once either Production has also failed, or
-/// `grace` has elapsed without Production answering — see
-/// [`PRODUCTION_GRACE`] for why an unconditional speed race is wrong here.
+/// Holds no I/O: the owning loop drives the actual [`mpsc::Receiver`] waits
+/// and feeds each event here with an explicit `now`, so every arrival-order
+/// combination is a plain, deterministic method call under test — no
+/// wall-clock sleeps standing in for real race timing. Production wins
+/// immediately; a pinned mirror (Pages or jsDelivr) answering first only
+/// wins once either Production has also failed, or `grace` has elapsed
+/// without Production answering — see [`PRODUCTION_GRACE`] for why an
+/// unconditional speed race is wrong here.
+struct MirrorRace<T> {
+    production_error: Option<AssetError>,
+    pages_error: Option<AssetError>,
+    jsdelivr_error: Option<AssetError>,
+    pinned_fallback: Option<(BuiltInSource, T)>,
+    deadline: Option<Instant>,
+}
+
+impl<T> MirrorRace<T> {
+    fn new() -> Self {
+        Self {
+            production_error: None,
+            pages_error: None,
+            jsdelivr_error: None,
+            pinned_fallback: None,
+            deadline: None,
+        }
+    }
+
+    /// How long the owning loop should wait for the next event — `None`
+    /// means block indefinitely (no pinned fallback is on the clock yet).
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// Record one probe success.
+    fn on_success(
+        &mut self,
+        source: BuiltInSource,
+        probe: T,
+        now: Instant,
+        grace: Duration,
+    ) -> Step<T> {
+        if matches!(source, BuiltInSource::Production) {
+            return Step::Done(RaceOutcome::Use(source, probe));
+        }
+        if self.production_error.is_some() {
+            // Production is already known dead — nothing left to wait for.
+            return Step::Done(RaceOutcome::Use(source, probe));
+        }
+        if self.pinned_fallback.is_some() {
+            return Step::Continue {
+                superseded: Some(source),
+            };
+        }
+        self.pinned_fallback = Some((source, probe));
+        self.deadline = Some(now + grace);
+        Step::Continue { superseded: None }
+    }
+
+    /// Record one probe failure.
+    fn on_failure(&mut self, source: BuiltInSource, error: AssetError) -> Step<T> {
+        match source {
+            BuiltInSource::Production => {
+                self.production_error = Some(error);
+                // Production is now confirmed dead: a pinned fallback
+                // already in hand has nothing left to wait for.
+                if let Some((source, probe)) = self.pinned_fallback.take() {
+                    return Step::Done(RaceOutcome::Use(source, probe));
+                }
+            }
+            BuiltInSource::Pages => self.pages_error = Some(error),
+            BuiltInSource::JsDelivr => self.jsdelivr_error = Some(error),
+        }
+        match (
+            self.production_error.take(),
+            self.pages_error.take(),
+            self.jsdelivr_error.take(),
+        ) {
+            (Some(production), Some(pages), Some(jsdelivr)) => Step::Done(RaceOutcome::AllFailed {
+                production: Box::new(production),
+                pages: Box::new(pages),
+                jsdelivr: Box::new(jsdelivr),
+            }),
+            // Not every source has reported yet — put the errors collected
+            // so far back for the next call to see.
+            (production, pages, jsdelivr) => {
+                self.production_error = production;
+                self.pages_error = pages;
+                self.jsdelivr_error = jsdelivr;
+                Step::Continue { superseded: None }
+            }
+        }
+    }
+
+    /// The receive wait ended with no more sources left to hear from
+    /// (deadline elapsed, or the channel disconnected) — use whatever
+    /// pinned fallback is on hand, or give up.
+    fn conclude(&mut self) -> RaceOutcome<T> {
+        self.pinned_fallback
+            .take()
+            .map_or(RaceOutcome::Interrupted, |(source, probe)| {
+                RaceOutcome::Use(source, probe)
+            })
+    }
+}
+
+/// Arbitrate the three probe threads' results — see [`MirrorRace`].
 fn race_sources<T>(
     receiver: &mpsc::Receiver<(BuiltInSource, Result<T, AssetError>)>,
     grace: Duration,
 ) -> RaceOutcome<T> {
-    let mut production_error = None;
-    let mut pages_error = None;
-    let mut jsdelivr_error = None;
-    let mut pinned_fallback: Option<(BuiltInSource, T)> = None;
-    let mut deadline: Option<Instant> = None;
-
+    let mut race = MirrorRace::new();
     loop {
-        let event = match deadline {
+        let event = match race.deadline() {
             Some(deadline) => {
                 receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
             }
@@ -267,58 +375,30 @@ fn race_sources<T>(
         };
         let (source, result) = match event {
             Ok(pair) => pair,
-            Err(RecvTimeoutError::Timeout) => break,
-            Err(RecvTimeoutError::Disconnected) => {
-                if pinned_fallback.is_some() {
-                    break;
-                }
-                return RaceOutcome::Interrupted;
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                return race.conclude();
             }
         };
 
-        match result {
-            Ok(probe) => {
-                if matches!(source, BuiltInSource::Production) {
-                    return RaceOutcome::Use(source, probe);
-                }
-                if production_error.is_some() {
-                    // Production is already known dead — nothing left to wait for.
-                    return RaceOutcome::Use(source, probe);
-                }
-                if pinned_fallback.is_none() {
-                    pinned_fallback = Some((source, probe));
-                    deadline = Some(Instant::now() + grace);
-                }
-            }
+        let step = match result {
+            Ok(probe) => race.on_success(source, probe, Instant::now(), grace),
             Err(error) => {
                 warn!(%source, error = ?error, "asset source probe failed");
-                match source {
-                    BuiltInSource::Production => {
-                        production_error = Some(error);
-                        if pinned_fallback.is_some() {
-                            break;
-                        }
-                    }
-                    BuiltInSource::Pages => pages_error = Some(error),
-                    BuiltInSource::JsDelivr => jsdelivr_error = Some(error),
-                }
-                if production_error.is_some() && pages_error.is_some() && jsdelivr_error.is_some() {
-                    break;
-                }
+                race.on_failure(source, error)
+            }
+        };
+        match step {
+            Step::Done(outcome) => return outcome,
+            Step::Continue { superseded: None } => {}
+            Step::Continue {
+                superseded: Some(source),
+            } => {
+                debug!(
+                    %source,
+                    "asset source probe answered after a pinned fallback was already recorded"
+                );
             }
         }
-    }
-
-    if let Some((source, probe)) = pinned_fallback {
-        return RaceOutcome::Use(source, probe);
-    }
-    match (production_error, pages_error, jsdelivr_error) {
-        (Some(production), Some(pages), Some(jsdelivr)) => RaceOutcome::AllFailed {
-            production: Box::new(production),
-            pages: Box::new(pages),
-            jsdelivr: Box::new(jsdelivr),
-        },
-        _ => RaceOutcome::Interrupted,
     }
 }
 
@@ -387,86 +467,98 @@ fn build_jsdelivr_client(index: &Index, routes: &NpmRoutes) -> Result<AssetClien
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::{AssetError, DeviceEntry, Index};
 
     use super::{
-        ASSET_VERSION, BuiltInSource, NPM_ROUTES_SCHEMA, NpmRoutes, RaceOutcome,
-        build_jsdelivr_client, race_sources,
+        ASSET_VERSION, BuiltInSource, MirrorRace, NPM_ROUTES_SCHEMA, NpmRoutes, RaceOutcome, Step,
+        build_jsdelivr_client,
     };
 
-    const TEST_GRACE: Duration = Duration::from_millis(60);
+    const GRACE: Duration = Duration::from_millis(1_200);
 
     fn dummy_error() -> AssetError {
         AssetError::SourceProbeInterrupted
     }
 
-    /// Sends `events` on a fresh channel, each after its given delay, then
-    /// hands `race_sources` the receiving end with `TEST_GRACE`.
-    fn race(events: Vec<(Duration, BuiltInSource, Result<u32, AssetError>)>) -> RaceOutcome<u32> {
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            for (delay, source, result) in events {
-                thread::sleep(delay);
-                let _ignore_disconnect = sender.send((source, result));
-            }
-        });
-        race_sources(&receiver, TEST_GRACE)
-    }
-
     #[test]
     fn production_wins_even_when_a_pinned_mirror_answers_first() {
-        let outcome = race(vec![
-            (Duration::ZERO, BuiltInSource::JsDelivr, Ok(1)),
-            (Duration::from_millis(20), BuiltInSource::Production, Ok(2)),
-        ]);
+        let now = Instant::now();
+        let mut race = MirrorRace::new();
 
         assert!(matches!(
-            outcome,
-            RaceOutcome::Use(BuiltInSource::Production, 2)
+            race.on_success(BuiltInSource::JsDelivr, 1, now, GRACE),
+            Step::Continue { superseded: None }
+        ));
+        assert!(matches!(
+            race.on_success(BuiltInSource::Production, 2, now, GRACE),
+            Step::Done(RaceOutcome::Use(BuiltInSource::Production, 2))
         ));
     }
 
     #[test]
     fn pinned_mirror_wins_once_the_grace_window_expires() {
-        let outcome = race(vec![(Duration::ZERO, BuiltInSource::JsDelivr, Ok(1))]);
+        let mut race: MirrorRace<u32> = MirrorRace::new();
+        race.on_success(BuiltInSource::JsDelivr, 1, Instant::now(), GRACE);
 
+        // The owning loop calls `conclude` once the receive wait times out
+        // against `race.deadline()` — simulated directly, with no real sleep.
         assert!(matches!(
-            outcome,
+            race.conclude(),
             RaceOutcome::Use(BuiltInSource::JsDelivr, 1)
         ));
     }
 
     #[test]
     fn pinned_mirror_wins_immediately_once_production_has_already_failed() {
-        let outcome = race(vec![
-            (
-                Duration::ZERO,
-                BuiltInSource::Production,
-                Err(dummy_error()),
-            ),
-            (Duration::from_millis(5), BuiltInSource::Pages, Ok(1)),
-        ]);
+        let mut race = MirrorRace::new();
 
-        assert!(matches!(outcome, RaceOutcome::Use(BuiltInSource::Pages, 1)));
+        assert!(matches!(
+            race.on_failure(BuiltInSource::Production, dummy_error()),
+            Step::Continue { superseded: None }
+        ));
+        assert!(matches!(
+            race.on_success(BuiltInSource::Pages, 1, Instant::now(), GRACE),
+            Step::Done(RaceOutcome::Use(BuiltInSource::Pages, 1))
+        ));
+    }
+
+    #[test]
+    fn a_second_pinned_success_is_reported_as_superseded_not_silently_dropped() {
+        let now = Instant::now();
+        let mut race: MirrorRace<u32> = MirrorRace::new();
+        race.on_success(BuiltInSource::JsDelivr, 1, now, GRACE);
+
+        // The first fallback stays the one `conclude` will use...
+        assert!(matches!(
+            race.on_success(BuiltInSource::Pages, 2, now, GRACE),
+            Step::Continue {
+                superseded: Some(BuiltInSource::Pages)
+            }
+        ));
+        assert!(matches!(
+            race.conclude(),
+            RaceOutcome::Use(BuiltInSource::JsDelivr, 1)
+        ));
     }
 
     #[test]
     fn every_source_failing_reports_all_three_errors() {
-        let outcome = race(vec![
-            (
-                Duration::ZERO,
-                BuiltInSource::Production,
-                Err(dummy_error()),
-            ),
-            (Duration::ZERO, BuiltInSource::Pages, Err(dummy_error())),
-            (Duration::ZERO, BuiltInSource::JsDelivr, Err(dummy_error())),
-        ]);
+        let mut race: MirrorRace<u32> = MirrorRace::new();
 
-        assert!(matches!(outcome, RaceOutcome::AllFailed { .. }));
+        assert!(matches!(
+            race.on_failure(BuiltInSource::Production, dummy_error()),
+            Step::Continue { superseded: None }
+        ));
+        assert!(matches!(
+            race.on_failure(BuiltInSource::Pages, dummy_error()),
+            Step::Continue { superseded: None }
+        ));
+        assert!(matches!(
+            race.on_failure(BuiltInSource::JsDelivr, dummy_error()),
+            Step::Done(RaceOutcome::AllFailed { .. })
+        ));
     }
 
     fn one_device_index() -> Index {
