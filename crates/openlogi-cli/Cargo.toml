@@ -20,9 +20,10 @@ tarpc = { workspace = true }
 png = "0.17"
 clap = { workspace = true }
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+async-channel = "2.3.1"
 
 [lints]
 workspace = true

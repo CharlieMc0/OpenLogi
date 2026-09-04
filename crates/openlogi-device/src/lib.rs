@@ -22,6 +22,7 @@ mod device_io;
 pub mod backend;
 pub mod backlight;
 pub mod inventory;
+pub mod mouse_button_spy;
 pub mod pairing;
 pub mod reprog_controls;
 pub mod session;
@@ -42,6 +43,9 @@ pub use device_io::{DeviceIoGate, DeviceIoSignal, device_io_channel};
 pub use inventory::hotplug::watch_hotplug;
 pub use inventory::standalone::enumerate_standalone;
 pub use inventory::{Enumerator, InventoryError, enumerate};
+pub use mouse_button_spy::{
+    MouseButtonIndex, MouseButtonMask, MouseButtonSpy, MouseButtonSpyEvent,
+};
 pub use openlogi_core::hid::smartshift;
 pub use openlogi_core::hid::smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
@@ -63,8 +67,7 @@ pub use session::keyboard::{
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,
-    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraDescriptor, LitraModel,
-    MouseButtonIndex, MouseButtonMask, MouseButtonSpyEvent, MouseButtonSpyFeature, OnboardMode,
+    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraDescriptor, LitraModel, OnboardMode,
     OnboardProfilesInfo, ProfilesDescription, ReprogControlEntry, ScrollReportingTarget,
     ScrollResolution, ScrollWheelMode, WriteError, apply_litra, commands_for_light_settings,
     dump_features, dump_firmware_entities, dump_mouse_button_count, dump_onboard_profiles,

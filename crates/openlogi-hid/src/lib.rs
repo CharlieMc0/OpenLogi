@@ -26,7 +26,6 @@ pub mod probe_cache;
 pub use openlogi_device::*;
 pub use openlogi_device::{backend, inventory, pairing, session, write};
 
-pub use hidpp::feature::EmittingFeature;
 pub use hidpp::feature::FeatureType;
 pub use hidpp::feature::device_information::DeviceEntityType;
 pub use host::{

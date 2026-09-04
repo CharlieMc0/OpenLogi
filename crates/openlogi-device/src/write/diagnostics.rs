@@ -18,6 +18,7 @@ use hidpp::{
 
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
+use crate::mouse_button_spy::MouseButtonSpy;
 use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
 use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
@@ -201,20 +202,29 @@ pub async fn dump_mouse_button_count(
 /// Opens the device's `0x8110` `MouseButtonSpy` feature for live event
 /// watching (`openlogi diag mouse-buttons --watch`).
 ///
-/// The returned feature holds its own channel handle (via its
-/// `FeatureEndpoint`), so it keeps working after this call returns — the
-/// caller is responsible for `start_spy`/`stop_spy` and for listening via
-/// [`hidpp::feature::EmittingFeature::listen`].
+/// The returned accessor holds its own channel handle, so it keeps working
+/// after this call returns — the caller is responsible for
+/// `start_reporting`/`stop_reporting` and for `listen`ing to it.
 pub async fn open_mouse_button_spy(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
-) -> Result<Arc<MouseButtonSpyFeature>, WriteError> {
+) -> Result<MouseButtonSpy, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
+        let device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        open_feature::<MouseButtonSpyFeature>(&mut device).await
+        let info = device
+            .root()
+            .get_feature(MouseButtonSpyFeature::ID)
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::DumpFeatures, MouseButtonSpyFeature::ID)
+            })?
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: MouseButtonSpyFeature::ID,
+            })?;
+        Ok(MouseButtonSpy::new(Arc::clone(&channel), index, info.index))
     })
     .await
 }

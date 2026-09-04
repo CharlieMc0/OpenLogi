@@ -38,11 +38,7 @@ pub use dpi::{
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{set_fn_lock, set_fn_lock_on};
 pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
-pub use hidpp::feature::EmittingFeature;
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
-pub use hidpp::feature::mouse_button_spy::{
-    MouseButtonIndex, MouseButtonMask, MouseButtonSpyEvent, MouseButtonSpyFeature,
-};
 pub use hidpp::feature::onboard_profiles::{OnboardMode, ProfilesDescription};
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,

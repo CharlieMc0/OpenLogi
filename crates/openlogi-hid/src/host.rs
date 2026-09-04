@@ -26,7 +26,7 @@ use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
-use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
+use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute, MouseButtonSpy};
 
 /// This host's HID stack.
 ///
@@ -208,9 +208,7 @@ pub async fn dump_mouse_button_count(route: &DeviceRoute) -> Result<u8, WriteErr
 
 /// Open the device `route` reaches for live `0x8110` `MouseButtonSpy`
 /// watching — see [`device::open_mouse_button_spy`].
-pub async fn open_mouse_button_spy(
-    route: &DeviceRoute,
-) -> Result<Arc<device::MouseButtonSpyFeature>, WriteError> {
+pub async fn open_mouse_button_spy(route: &DeviceRoute) -> Result<MouseButtonSpy, WriteError> {
     device::open_mouse_button_spy(&*native_backend(), route).await
 }
 
