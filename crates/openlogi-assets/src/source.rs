@@ -1,15 +1,20 @@
 //! Built-in asset mirror discovery and npm shard routing.
 //!
 //! A synchronization run races the production custom domain, its versioned
-//! Cloudflare Pages alias, and the fixed jsDelivr npm release. The first
-//! source with a complete valid catalog supplies both `index.json` and every
-//! subsequent file URL for that run, so caches never mix mirrors mid-sync.
+//! Cloudflare Pages alias, and the fixed jsDelivr npm release. Whichever
+//! source answers supplies both `index.json` and every subsequent file URL
+//! for that run, so caches never mix mirrors mid-sync — except Production
+//! wins over a same-race pinned-mirror answer as long as it reports in
+//! within [`PRODUCTION_GRACE`]: Pages and jsDelivr are frozen at
+//! `ASSET_VERSION`, so letting either win a pure speed race would let a
+//! stale catalog silently beat a healthy, more current Production.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -32,6 +37,16 @@ const JSDELIVR_PACKAGE_ROOT: &str = "https://cdn.jsdelivr.net/npm";
 
 /// npm asset release this OpenLogi build understands.
 const ASSET_VERSION: &str = "0.1.0";
+
+/// How long a pinned-version mirror's success waits for the mutable
+/// Production endpoint before it is used.
+///
+/// Pages and jsDelivr are frozen at `ASSET_VERSION` — potentially months
+/// behind Production, which publishes new depots continuously — but their
+/// edge caches routinely answer faster than Production's custom domain. This
+/// window absorbs that ordinary latency gap while staying short enough that
+/// a genuine Production outage still falls back close to instantly.
+const PRODUCTION_GRACE: Duration = Duration::from_millis(1_200);
 
 /// Filename and schema of the depot-to-package routing catalog.
 const NPM_ROUTES_NAME: &str = "npm-routes.json";
@@ -197,35 +212,113 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
     });
     drop(sender);
 
+    match race_sources(&receiver, PRODUCTION_GRACE) {
+        RaceOutcome::Use(source, probe) => registry_from_probe(source.into(), probe, dir),
+        RaceOutcome::AllFailed {
+            production,
+            pages,
+            jsdelivr,
+        } => Err(AssetError::SourcesUnavailable {
+            production,
+            pages,
+            jsdelivr,
+        }),
+        RaceOutcome::Interrupted => Err(AssetError::SourceProbeInterrupted),
+    }
+}
+
+/// Result of [`race_sources`]: which source answered, or why none did.
+enum RaceOutcome<T> {
+    /// This source's probe succeeded and should supply the registry.
+    Use(BuiltInSource, T),
+    /// Every built-in source's probe failed.
+    AllFailed {
+        production: Box<AssetError>,
+        pages: Box<AssetError>,
+        jsdelivr: Box<AssetError>,
+    },
+    /// The channel closed before a winner was selected — the sending
+    /// threads panicked or were otherwise dropped without reporting.
+    Interrupted,
+}
+
+/// Arbitrate the three probe threads' results.
+///
+/// Production wins immediately. A pinned mirror (Pages or jsDelivr)
+/// answering first only wins once either Production has also failed, or
+/// `grace` has elapsed without Production answering — see
+/// [`PRODUCTION_GRACE`] for why an unconditional speed race is wrong here.
+fn race_sources<T>(
+    receiver: &mpsc::Receiver<(BuiltInSource, Result<T, AssetError>)>,
+    grace: Duration,
+) -> RaceOutcome<T> {
     let mut production_error = None;
     let mut pages_error = None;
     let mut jsdelivr_error = None;
-    while let Ok((source, result)) = receiver.recv() {
+    let mut pinned_fallback: Option<(BuiltInSource, T)> = None;
+    let mut deadline: Option<Instant> = None;
+
+    loop {
+        let event = match deadline {
+            Some(deadline) => {
+                receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            }
+            None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let (source, result) = match event {
+            Ok(pair) => pair,
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                if pinned_fallback.is_some() {
+                    break;
+                }
+                return RaceOutcome::Interrupted;
+            }
+        };
+
         match result {
             Ok(probe) => {
-                // A local persistence failure is independent of the selected mirror.
-                return registry_from_probe(source.into(), probe, dir);
+                if matches!(source, BuiltInSource::Production) {
+                    return RaceOutcome::Use(source, probe);
+                }
+                if production_error.is_some() {
+                    // Production is already known dead — nothing left to wait for.
+                    return RaceOutcome::Use(source, probe);
+                }
+                if pinned_fallback.is_none() {
+                    pinned_fallback = Some((source, probe));
+                    deadline = Some(Instant::now() + grace);
+                }
             }
             Err(error) => {
                 warn!(%source, error = ?error, "asset source probe failed");
                 match source {
-                    BuiltInSource::Production => production_error = Some(error),
+                    BuiltInSource::Production => {
+                        production_error = Some(error);
+                        if pinned_fallback.is_some() {
+                            break;
+                        }
+                    }
                     BuiltInSource::Pages => pages_error = Some(error),
                     BuiltInSource::JsDelivr => jsdelivr_error = Some(error),
                 }
+                if production_error.is_some() && pages_error.is_some() && jsdelivr_error.is_some() {
+                    break;
+                }
             }
         }
-        if production_error.is_some() && pages_error.is_some() && jsdelivr_error.is_some() {
-            break;
-        }
+    }
+
+    if let Some((source, probe)) = pinned_fallback {
+        return RaceOutcome::Use(source, probe);
     }
     match (production_error, pages_error, jsdelivr_error) {
-        (Some(production), Some(pages), Some(jsdelivr)) => Err(AssetError::SourcesUnavailable {
+        (Some(production), Some(pages), Some(jsdelivr)) => RaceOutcome::AllFailed {
             production: Box::new(production),
             pages: Box::new(pages),
             jsdelivr: Box::new(jsdelivr),
-        }),
-        _ => Err(AssetError::SourceProbeInterrupted),
+        },
+        _ => RaceOutcome::Interrupted,
     }
 }
 
@@ -294,10 +387,87 @@ fn build_jsdelivr_client(index: &Index, routes: &NpmRoutes) -> Result<AssetClien
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     use crate::{AssetError, DeviceEntry, Index};
 
-    use super::{ASSET_VERSION, NPM_ROUTES_SCHEMA, NpmRoutes, build_jsdelivr_client};
+    use super::{
+        ASSET_VERSION, BuiltInSource, NPM_ROUTES_SCHEMA, NpmRoutes, RaceOutcome,
+        build_jsdelivr_client, race_sources,
+    };
+
+    const TEST_GRACE: Duration = Duration::from_millis(60);
+
+    fn dummy_error() -> AssetError {
+        AssetError::SourceProbeInterrupted
+    }
+
+    /// Sends `events` on a fresh channel, each after its given delay, then
+    /// hands `race_sources` the receiving end with `TEST_GRACE`.
+    fn race(events: Vec<(Duration, BuiltInSource, Result<u32, AssetError>)>) -> RaceOutcome<u32> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            for (delay, source, result) in events {
+                thread::sleep(delay);
+                let _ignore_disconnect = sender.send((source, result));
+            }
+        });
+        race_sources(&receiver, TEST_GRACE)
+    }
+
+    #[test]
+    fn production_wins_even_when_a_pinned_mirror_answers_first() {
+        let outcome = race(vec![
+            (Duration::ZERO, BuiltInSource::JsDelivr, Ok(1)),
+            (Duration::from_millis(20), BuiltInSource::Production, Ok(2)),
+        ]);
+
+        assert!(matches!(
+            outcome,
+            RaceOutcome::Use(BuiltInSource::Production, 2)
+        ));
+    }
+
+    #[test]
+    fn pinned_mirror_wins_once_the_grace_window_expires() {
+        let outcome = race(vec![(Duration::ZERO, BuiltInSource::JsDelivr, Ok(1))]);
+
+        assert!(matches!(
+            outcome,
+            RaceOutcome::Use(BuiltInSource::JsDelivr, 1)
+        ));
+    }
+
+    #[test]
+    fn pinned_mirror_wins_immediately_once_production_has_already_failed() {
+        let outcome = race(vec![
+            (
+                Duration::ZERO,
+                BuiltInSource::Production,
+                Err(dummy_error()),
+            ),
+            (Duration::from_millis(5), BuiltInSource::Pages, Ok(1)),
+        ]);
+
+        assert!(matches!(outcome, RaceOutcome::Use(BuiltInSource::Pages, 1)));
+    }
+
+    #[test]
+    fn every_source_failing_reports_all_three_errors() {
+        let outcome = race(vec![
+            (
+                Duration::ZERO,
+                BuiltInSource::Production,
+                Err(dummy_error()),
+            ),
+            (Duration::ZERO, BuiltInSource::Pages, Err(dummy_error())),
+            (Duration::ZERO, BuiltInSource::JsDelivr, Err(dummy_error())),
+        ]);
+
+        assert!(matches!(outcome, RaceOutcome::AllFailed { .. }));
+    }
 
     fn one_device_index() -> Index {
         Index {
