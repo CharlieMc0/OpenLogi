@@ -1003,6 +1003,12 @@ fn build_devices(
         };
         devices.push(AgentDevice {
             config_key: config_key.into_string(),
+            // Standalone (raw-HID) devices carry no `DeviceModelInfo`, so this
+            // is the OS display name, not `DeviceModelInfo::config_key()`, and
+            // can never match a `SPY_BUTTON_MAPS` entry. Harmless while
+            // standalone enumeration is Litra-only with `capabilities: None`
+            // (so never `gaming_buttons`); re-type as `Option` if a HID++
+            // device ever arrives on this path.
             model_key: device.display_name.clone(),
             route: Some(route),
             slot: DIRECT_DEVICE_INDEX,
