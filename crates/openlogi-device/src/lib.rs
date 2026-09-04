@@ -22,6 +22,7 @@ mod device_io;
 pub mod backend;
 pub mod backlight;
 pub mod inventory;
+pub mod mouse_button_spy;
 pub mod pairing;
 pub mod reprog_controls;
 pub mod session;
@@ -42,6 +43,9 @@ pub use device_io::{DeviceIoGate, DeviceIoSignal, device_io_channel};
 pub use inventory::hotplug::watch_hotplug;
 pub use inventory::standalone::enumerate_standalone;
 pub use inventory::{Enumerator, InventoryError, enumerate};
+pub use mouse_button_spy::{
+    MouseButtonIndex, MouseButtonMask, MouseButtonSpy, MouseButtonSpyEvent,
+};
 pub use openlogi_core::hid::smartshift;
 pub use openlogi_core::hid::smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
@@ -63,14 +67,15 @@ pub use session::keyboard::{
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,
-    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraDescriptor, LitraModel,
-    ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WriteError,
-    apply_litra, commands_for_light_settings, dump_features, dump_firmware_entities,
+    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraDescriptor, LitraModel, OnboardMode,
+    OnboardProfilesInfo, ProfilesDescription, ReprogControlEntry, ScrollReportingTarget,
+    ScrollResolution, ScrollWheelMode, WriteError, apply_litra, commands_for_light_settings,
+    dump_features, dump_firmware_entities, dump_mouse_button_count, dump_onboard_profiles,
     dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on, find_litra, get_backlight,
     get_dpi, get_dpi_info, get_dpi_info_on, get_scroll_wheel_mode, get_scroll_wheel_mode_on,
     get_smartshift_status, get_smartshift_status_on, litra_model_for_route, matches_litra,
-    play_haptic, play_haptic_on, read_battery_raw, set_backlight_enabled, set_dpi, set_dpi_on,
-    set_fn_lock, set_fn_lock_on, set_keyboard_color, set_keyboard_color_on,
+    open_mouse_button_spy, play_haptic, play_haptic_on, read_battery_raw, set_backlight_enabled,
+    set_dpi, set_dpi_on, set_fn_lock, set_fn_lock_on, set_keyboard_color, set_keyboard_color_on,
     set_keyboard_color_with, set_keyboard_color_with_on, set_scroll_inversion,
     set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,

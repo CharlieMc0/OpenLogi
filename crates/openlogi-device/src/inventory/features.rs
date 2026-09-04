@@ -27,6 +27,7 @@ use super::mappings::{
     map_legacy_battery_status, map_voltage_battery_status, normalize_serial_number,
     voltage_battery_percentage,
 };
+use crate::session::gesture::spy_buttons_for_model;
 
 /// Everything a single device probe yields. Any field is `None` when the
 /// device doesn't expose that feature or the read failed.
@@ -183,6 +184,49 @@ async fn read_marketing_identity(
     (kind, name)
 }
 
+/// Read HID++ `0x0003` `DeviceInformation` identity, when the device exposes
+/// it. The second element is `true` when a read failed and the identity is
+/// therefore understated — the caller must not let that be memoized.
+async fn read_model_info(device: &Device, slot: u8) -> (Option<DeviceModelInfo>, bool) {
+    let Some(feature) = device.get_feature::<DeviceInformationFeature>() else {
+        return (None, false);
+    };
+    let info = match feature.get_device_info().await {
+        Ok(info) => info,
+        Err(e) => {
+            debug!(slot, error = ?e, "DeviceInformation read failed");
+            return (None, true);
+        }
+    };
+    let mut identity_incomplete = false;
+    let serial_number = if info.capabilities.serial_number {
+        match feature.get_serial_number().await {
+            Ok(serial) => normalize_serial_number(&serial),
+            Err(e) => {
+                debug!(slot, error = ?e, "DeviceInformation serial read failed");
+                identity_incomplete = true;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let model_info = DeviceModelInfo {
+        entity_count: info.entity_count,
+        serial_number,
+        unit_id: info.unit_id,
+        transports: DeviceTransports {
+            usb: info.transport.contains(DeviceTransport::USB),
+            equad: info.transport.contains(DeviceTransport::E_QUAD),
+            btle: info.transport.contains(DeviceTransport::BTLE),
+            bluetooth: info.transport.contains(DeviceTransport::BLUETOOTH),
+        },
+        model_ids: info.model_id,
+        extended_model_id: info.extended_model_id,
+    };
+    (Some(model_info), identity_incomplete)
+}
+
 /// Open a HID++ session for `slot` and read everything we care about (battery,
 /// device-information, `0x0005` device type, and the feature table that drives
 /// [`Capabilities`]) in one shot. Device sessions are expensive (multi-round-
@@ -215,6 +259,7 @@ pub(super) async fn probe_features(
     let mut battery_probe = None;
     let mut event_features = EventFeatureIndices::default();
     let mut probe_haptic_controls = false;
+    let mut feature_ids: Option<Vec<u16>> = None;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
@@ -226,7 +271,9 @@ pub(super) async fn probe_features(
                 subscriptions.register_device(slot, event_features);
             }
             probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
-            Some(Capabilities::from_feature_ids(&ids))
+            let caps = Capabilities::from_feature_ids(&ids);
+            feature_ids = Some(ids);
+            Some(caps)
         }
         Ok(None) => None,
         Err(e) => {
@@ -250,49 +297,19 @@ pub(super) async fn probe_features(
         None => None,
     };
 
-    let mut identity_incomplete = false;
-    let model_info = match device.get_feature::<DeviceInformationFeature>() {
-        Some(feature) => match feature.get_device_info().await {
-            Ok(info) => {
-                let serial_number = if info.capabilities.serial_number {
-                    match feature.get_serial_number().await {
-                        Ok(serial) => normalize_serial_number(&serial),
-                        Err(e) => {
-                            debug!(slot, error = ?e, "DeviceInformation serial read failed");
-                            identity_incomplete = true;
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                Some(DeviceModelInfo {
-                    entity_count: info.entity_count,
-                    serial_number,
-                    unit_id: info.unit_id,
-                    transports: DeviceTransports {
-                        usb: info.transport.contains(DeviceTransport::USB),
-                        equad: info.transport.contains(DeviceTransport::E_QUAD),
-                        btle: info.transport.contains(DeviceTransport::BTLE),
-                        bluetooth: info.transport.contains(DeviceTransport::BLUETOOTH),
-                    },
-                    model_ids: info.model_id,
-                    extended_model_id: info.extended_model_id,
-                })
-            }
-            Err(e) => {
-                debug!(slot, error = ?e, "DeviceInformation read failed");
-                identity_incomplete = true;
-                None
-            }
-        },
-        None => None,
-    };
+    let (model_info, identity_incomplete) = read_model_info(&device, slot).await;
 
     // `0x0005` reports the device's own marketing type and name. The type is
     // the authoritative kind signal; the marketing name matters especially on
     // Windows Bluetooth, where the OS HID collection is often just `"Mouse"`.
     let (kind, marketing_name) = read_marketing_identity(&device, slot).await;
+
+    narrow_gaming_buttons_to_verified_model(
+        slot,
+        capabilities.as_mut(),
+        feature_ids.as_deref(),
+        model_info.as_ref(),
+    );
 
     (
         ProbedFeatures {
@@ -307,6 +324,31 @@ pub(super) async fn probe_features(
         battery_probe,
         event_features,
     )
+}
+
+/// `Capabilities::from_feature_ids` only sees the feature-ID table, so
+/// `gaming_buttons` there just means "0x8100+0x8110 both present" — it
+/// cannot confirm this model is one OpenLogi has a verified `0x8110` button
+/// map for. Narrow it here, once the model identity is known, so the GUI's
+/// capability-driven Buttons tab never outlives the capture side's own
+/// per-model gate (`spy_buttons_for_model`).
+fn narrow_gaming_buttons_to_verified_model(
+    slot: u8,
+    capabilities: Option<&mut Capabilities>,
+    feature_ids: Option<&[u16]>,
+    model_info: Option<&DeviceModelInfo>,
+) {
+    let (Some(caps), Some(ids)) = (capabilities, feature_ids) else {
+        return;
+    };
+    let verified = model_info.is_some_and(|m| spy_buttons_for_model(&m.config_key()).is_some());
+    if caps.gaming_buttons && !verified {
+        debug!(
+            slot,
+            "0x8100+0x8110 present but no verified spy map for this model"
+        );
+        *caps = caps.without_gaming_buttons(ids);
+    }
 }
 
 /// Fill in the capabilities the feature table alone can't answer, each of which

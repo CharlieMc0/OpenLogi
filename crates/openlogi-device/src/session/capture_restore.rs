@@ -9,6 +9,7 @@ use hidpp::channel::HidppChannel;
 use thiserror::Error;
 
 use crate::backend::BackendError;
+use crate::mouse_button_spy::MouseButtonSpy;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::Thumbwheel;
 use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
@@ -135,6 +136,35 @@ pub struct PendingCaptureRestore {
     retired_policy: RetiredChannelPolicy,
     reprog: Option<ReprogRestore>,
     thumb_index: Option<u8>,
+    /// `0x8110` feature index, present when the session armed the spy.
+    /// Unlike a failed `reprog`/`thumb` restore, a failed
+    /// `stopMouseButtonSpy` leaves the button working exactly as it always
+    /// did — the spy is a tap, not a divert, so it never intercepted
+    /// anything to begin with. This still goes through the same restore
+    /// path for one restore authority and battery hygiene: while armed, the
+    /// spy reports every button press, including left click.
+    spy_index: Option<u8>,
+}
+
+/// What firmware ownership a capture session armed, handed to
+/// [`PendingCaptureRestore::new`] as one value instead of a run of
+/// same-typed positional `Option`s that a call site could silently
+/// transpose.
+#[derive(Default)]
+pub(crate) struct FirmwareOwnership {
+    /// `0x1b04` controls diverted, if any.
+    pub(crate) reprog: Option<ReprogRestore>,
+    /// `0x2150 Thumbwheel` feature index, if diverted.
+    pub(crate) thumb_index: Option<u8>,
+    /// `0x8110 MouseButtonSpy` feature index, present when the session armed
+    /// the spy.
+    pub(crate) spy_index: Option<u8>,
+}
+
+impl FirmwareOwnership {
+    fn is_empty(&self) -> bool {
+        self.reprog.is_none() && self.thumb_index.is_none() && self.spy_index.is_none()
+    }
 }
 
 impl fmt::Debug for PendingCaptureRestore {
@@ -149,25 +179,23 @@ impl fmt::Debug for PendingCaptureRestore {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
+            .field("has_spy", &self.spy_index.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl PendingCaptureRestore {
-    pub(crate) fn new(
-        retired: &SharedChannel,
-        reprog: Option<ReprogRestore>,
-        thumb_index: Option<u8>,
-    ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
+    pub(crate) fn new(retired: &SharedChannel, ownership: FirmwareOwnership) -> Option<Self> {
+        if ownership.is_empty() {
             return None;
         }
         Some(Self {
             route: retired.route().clone(),
             retired_channel: Arc::downgrade(retired.channel()),
             retired_policy: RetiredChannelPolicy::ReplacementOnly,
-            reprog,
-            thumb_index,
+            reprog: ownership.reprog,
+            thumb_index: ownership.thumb_index,
+            spy_index: ownership.spy_index,
         })
     }
 
@@ -225,8 +253,12 @@ impl PendingCaptureRestore {
             }
         }
         if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, feature_index);
             restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
+        }
+        if let Some(feature_index) = self.spy_index {
+            let spy = MouseButtonSpy::new(channel, device_index, feature_index);
+            restored &= restore_result(spy.stop_reporting().await, "mouse button spy");
         }
         restored
     }
@@ -324,6 +356,17 @@ pub(crate) async fn drop_listener_after<T, R>(listener: T, teardown: impl Future
     let result = teardown.await;
     drop(listener);
     result
+}
+
+/// One arm of a `tokio::select!` reconnect/event loop: await the next value
+/// from `receiver` when armed, or never resolve when it's `None` so the
+/// `select!` simply skips this arm. Shared by every event source a capture
+/// session's monitor loop polls this way (wireless reconnect, the button spy).
+pub(crate) async fn poll_optional<T>(receiver: Option<&async_channel::Receiver<T>>) -> Option<T> {
+    match receiver {
+        Some(receiver) => receiver.recv().await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 /// Divert a control in the requested mode while preserving its remap target.

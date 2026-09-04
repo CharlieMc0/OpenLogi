@@ -32,7 +32,8 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    DeviceCaptureIdentity, DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for,
+    plan_for_device,
 };
 use crate::hardware::DeviceOp;
 use crate::observable::ObservableState;
@@ -444,9 +445,12 @@ impl Orchestrator {
                     .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
                 Some(plan_for_device(
                     &self.config,
-                    physical_key,
-                    &dev.config_key,
-                    route,
+                    DeviceCaptureIdentity {
+                        physical_key,
+                        config_key: &dev.config_key,
+                        model_key: &dev.model_key,
+                        route,
+                    },
                     self.current_app.as_deref(),
                     rearm_generation,
                     self.os_mouse_hook_available,
@@ -999,6 +1003,12 @@ fn build_devices(
         };
         devices.push(AgentDevice {
             config_key: config_key.into_string(),
+            // Standalone (raw-HID) devices carry no `DeviceModelInfo`, so this
+            // is the OS display name, not `DeviceModelInfo::config_key()`, and
+            // can never match a `SPY_BUTTON_MAPS` entry. Harmless while
+            // standalone enumeration is Litra-only with `capabilities: None`
+            // (so never `gaming_buttons`); re-type as `Option` if a HID++
+            // device ever arrives on this path.
             model_key: device.display_name.clone(),
             route: Some(route),
             slot: DIRECT_DEVICE_INDEX,
