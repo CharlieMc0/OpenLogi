@@ -100,6 +100,70 @@ impl OnboardProfilesFeature {
     /// Reads the device's current onboard/host mode (`getMode`, function 2).
     pub async fn get_mode(&self) -> Result<OnboardMode, Hidpp20Error> {
         let byte = self.endpoint.call(2, [0; 3]).await?.extend_payload()[0];
-        OnboardMode::try_from(byte).map_err(|_| Hidpp20Error::UnsupportedResponse)
+        parse_mode(byte)
+    }
+}
+
+fn parse_mode(byte: u8) -> Result<OnboardMode, Hidpp20Error> {
+    OnboardMode::try_from(byte).map_err(|_| Hidpp20Error::UnsupportedResponse)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use super::{OnboardMode, ProfilesDescription, parse_mode};
+    use crate::protocol::v20::Hidpp20Error;
+
+    #[test]
+    fn parses_profiles_description() {
+        let mut payload = [0u8; 16];
+        payload[0] = 0x01; // memory_model_id
+        payload[1] = 0x02; // profile_format_id
+        payload[2] = 0x03; // macro_format_id
+        payload[3] = 5; // profile_count
+        payload[4] = 1; // profile_count_oob
+        payload[5] = 16; // button_count
+        payload[6] = 32; // sector_count
+        payload[7] = 0x01; // sector_size hi
+        payload[8] = 0x00; // sector_size lo
+        payload[9] = 0x07; // mechanical_layout
+        payload[10] = 0x09; // various_info
+        payload[11] = 0xff; // trailing bytes, ignored
+        payload[15] = 0xff;
+
+        let description = ProfilesDescription::from_payload(payload);
+
+        assert_eq!(description.memory_model_id, 0x01);
+        assert_eq!(description.profile_format_id, 0x02);
+        assert_eq!(description.macro_format_id, 0x03);
+        assert_eq!(description.profile_count, 5);
+        assert_eq!(description.profile_count_oob, 1);
+        assert_eq!(description.button_count, 16);
+        assert_eq!(description.sector_count, 32);
+        assert_eq!(description.sector_size, 256);
+        assert_eq!(description.mechanical_layout, 0x07);
+        assert_eq!(description.various_info, 0x09);
+    }
+
+    #[test]
+    fn rejects_the_write_only_no_change_sentinel_in_a_response() {
+        assert_matches!(parse_mode(0), Err(Hidpp20Error::UnsupportedResponse));
+    }
+
+    #[test]
+    fn parses_onboard_mode() {
+        assert_matches!(parse_mode(1), Ok(OnboardMode::Onboard));
+    }
+
+    #[test]
+    fn parses_host_mode() {
+        assert_matches!(parse_mode(2), Ok(OnboardMode::Host));
+    }
+
+    #[test]
+    fn rejects_unknown_mode_value() {
+        assert_matches!(parse_mode(3), Err(Hidpp20Error::UnsupportedResponse));
+        assert_matches!(parse_mode(0xff), Err(Hidpp20Error::UnsupportedResponse));
     }
 }

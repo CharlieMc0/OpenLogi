@@ -24,6 +24,8 @@ use crate::{
 };
 
 mod event;
+#[cfg(test)]
+mod tests;
 
 pub use event::MouseButtonSpyEvent;
 
