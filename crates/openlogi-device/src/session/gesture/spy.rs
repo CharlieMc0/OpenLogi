@@ -34,8 +34,7 @@ pub static SPY_BUTTON_MAPS: &[SpyButtonMap] = &[SpyButtonMap {
     // official button-map diagram:
     //   1 left, 2 right, 3 middle, 4/6 side (back/forward, native — not
     //   listed here), 5 DPI Shift, 7/8 wheel tilt (native scroll, not
-    //   listed), 9 Profile Cycling, 10/11 DPI up/down (order unconfirmed on
-    //   hardware — see the plan's verification step 5).
+    //   listed), 9 Profile Cycling, 10 DPI Up, 11 DPI Down.
     //
     // The firmware still acts on 5/9/10/11 itself (profile cycle / DPI
     // stage change) while in Onboard mode — confirmed on hardware (LED

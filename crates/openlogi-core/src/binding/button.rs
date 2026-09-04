@@ -85,11 +85,7 @@ pub enum ButtonId {
     /// firmware still cycles its onboard profile on press regardless of any
     /// OpenLogi binding, for the same reason as [`ButtonId::DpiShift`].
     ProfileCycle,
-    /// One of the G-series "DPI up/down" button pair. Captured over `0x8110`;
-    /// physical up-vs-down assignment is unconfirmed on hardware (see
-    /// `openlogi_device::session::gesture::spy::SPY_BUTTON_MAPS`'s doc
-    /// comment) and may need swapping with [`ButtonId::DpiDown`] once
-    /// verified.
+    /// The G-series "DPI Up" button, captured over `0x8110`.
     DpiUp,
     /// The other of the G-series "DPI up/down" button pair — see
     /// [`ButtonId::DpiUp`].

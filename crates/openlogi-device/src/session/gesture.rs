@@ -623,19 +623,17 @@ struct CaptureMonitor<'a> {
     sink: &'a mpsc::UnboundedSender<CapturedInput>,
 }
 
-/// Poll `receiver` for its next event, or pend forever while it is `None` —
-/// an unarmed source has nothing to poll but must not busy-loop the
-/// `select!` it feeds.
-async fn poll_optional<T>(receiver: Option<&async_channel::Receiver<T>>) -> Option<T> {
-    match receiver {
-        Some(events) => events.recv().await.ok(),
-        None => std::future::pending().await,
-    }
-}
-
 /// Keep a capture session alive and reapply its volatile diversions whenever
 /// the device announces a reconnect. Returns only the typed reason capture
 /// stopped; restoration performs a fresh registry lookup after monitoring.
+// Grown by the spy's own select arm (a fourth capture mechanism alongside
+// reprog/thumbwheel/wireless-reconnect, each already needing its own arm
+// here); splitting it would scatter one state machine across files for no
+// reader benefit.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one control-capture state machine; see the comment above"
+)]
 async fn monitor_capture(
     context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
@@ -695,7 +693,12 @@ async fn monitor_capture(
                 // be obsolete.
                 return stop_for_current_publication(context.registry, context.shared);
             }
-            event = poll_optional(wake_events.as_ref()) => {
+            event = async {
+                match wake_events.as_ref() {
+                    Some(events) => events.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
                 let Some(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
                     wake_events = None;
                     continue;
@@ -706,12 +709,22 @@ async fn monitor_capture(
                 spy_mask = MouseButtonMask::default();
                 context.armed.rearm(&device_io).await;
             }
-            event = poll_optional(spy_events) => {
-                if !handle_spy_event(event, context.armed, context.sink, &mut spy_mask) {
+            event = async {
+                match spy_events {
+                    Some(events) => events.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(MouseButtonSpyEvent::Buttons(mask)) = event else {
                     // The receiver's sender was dropped (the spy feature went
                     // away) — stop polling a permanently-closed channel.
                     spy_events = None;
+                    continue;
+                };
+                if let Some(armed_spy) = context.armed.spy.as_ref() {
+                    spy_edges(spy_mask, mask, armed_spy.buttons, context.sink);
                 }
+                spy_mask = mask;
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
@@ -748,25 +761,6 @@ async fn monitor_capture(
             }
         }
     }
-}
-
-/// Handle one polled `0x8110` spy event: emit the mask's edges and advance
-/// `spy_mask`. Returns `false` when `event` is `None` (the receiver's sender
-/// was dropped), telling the caller to stop polling a closed channel.
-fn handle_spy_event(
-    event: Option<MouseButtonSpyEvent>,
-    armed: &ArmedControls,
-    sink: &mpsc::UnboundedSender<CapturedInput>,
-    spy_mask: &mut MouseButtonMask,
-) -> bool {
-    let Some(MouseButtonSpyEvent::Buttons(mask)) = event else {
-        return false;
-    };
-    if let Some(armed_spy) = armed.spy.as_ref() {
-        spy_edges(*spy_mask, mask, armed_spy.buttons, sink);
-    }
-    *spy_mask = mask;
-    true
 }
 
 /// Resolve features off the device's root and divert the controls `spec`

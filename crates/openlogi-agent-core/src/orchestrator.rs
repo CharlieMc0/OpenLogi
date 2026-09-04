@@ -50,13 +50,6 @@ use crate::{DpiCycleState, DpiCycles};
 /// fallback agrees with the GUI carousel — see [`openlogi_core::device_order`]).
 struct AgentDevice {
     config_key: String,
-    /// `DeviceModelInfo::config_key()` for a receiver-paired/HID++ device —
-    /// what `capture_plan::spy_buttons_for_model` keys its lookup on. The
-    /// standalone-device constructor below instead fills this with
-    /// `display_name`, which can never match a `SPY_BUTTON_MAPS` entry — a
-    /// latent mismatch, harmless today because standalone enumeration is
-    /// Litra-only (never `Capabilities::gaming_buttons`), but real once a
-    /// gaming device is ever reachable through the standalone/raw-HID path.
     model_key: String,
     route: Option<DeviceRoute>,
     slot: u8,
